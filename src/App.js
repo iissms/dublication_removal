@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 
 const mathQuestion = `A series $LCR$ circuit consists of $R = 80\\,\\Omega$, $X_L = 100\\,\\Omega$, and $X_C = 40\\,\\Omega$. The input voltage is $2500 \\cos(100\\pi t)\\,\\text{V}$. The amplitude of current, in the circuit, is ___$A$.`;
@@ -23,11 +23,32 @@ const nl = (s) => {
   return out;
 };
 
+const MathJaxContent = memo(function MathJaxContent({ id, latex, onTypeset }) {
+  const containerRef = useRef(null);
+  const processedLatex = useMemo(() => nl(latex), [latex]);
+
+  useEffect(() => {
+    if (!containerRef.current) {
+      return;
+    }
+
+    containerRef.current.innerHTML = processedLatex;
+
+    if (window.MathJax?.Hub) {
+      const typesetTarget = containerRef.current;
+      window.MathJax.Hub.Queue(['Typeset', window.MathJax.Hub, typesetTarget]);
+      if (typeof onTypeset === 'function') {
+        window.MathJax.Hub.Queue(onTypeset);
+      }
+    }
+  }, [processedLatex, onTypeset]);
+
+  return <p id={id} ref={containerRef} />;
+});
+
 function App() {
   const mathJaxLoaded = useRef(false);
   const [mathML, setMathML] = useState({ question: [], answer: [] });
-  const processedQuestion = nl(mathQuestion);
-  const processedAnswer = nl(mathAnswer);
 
   const updateMathML = useCallback(() => {
     if (!window.MathJax?.Hub) {
@@ -91,39 +112,12 @@ function App() {
     }
   }, [updateMathML]);
 
-  useEffect(() => {
-    if (!mathJaxLoaded.current || !window.MathJax?.Hub) {
-      return undefined;
-    }
-
-    let cancelled = false;
-
-    const safeUpdate = () => {
-      if (!cancelled) {
-        updateMathML();
-      }
-    };
-
-    window.MathJax.Hub.Queue(['Typeset', window.MathJax.Hub]);
-    window.MathJax.Hub.Queue(safeUpdate);
-
-    return () => {
-      cancelled = true;
-    };
-  }, [processedQuestion, processedAnswer, updateMathML]);
-
   return (
     <div className="App">
       <main className="App-content">
         <h1>Physics Question</h1>
-        <p
-          id="math-question"
-          dangerouslySetInnerHTML={{ __html: processedQuestion }}
-        />
-        <p
-          id="math-answer"
-          dangerouslySetInnerHTML={{ __html: processedAnswer }}
-        />
+        <MathJaxContent id="math-question" latex={mathQuestion} onTypeset={updateMathML} />
+        <MathJaxContent id="math-answer" latex={mathAnswer} onTypeset={updateMathML} />
         <section className="mathml-output">
           <h2>MathML from MathJax</h2>
           <div className="mathml-section">
