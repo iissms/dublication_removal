@@ -10,11 +10,14 @@ from typing import List, Sequence
 import numpy as np
 
 from question_matcher import (
+    MathMLConverter,
     ModelParameters,
     Vocabulary,
+    convert_text_to_mathml,
     cosine_similarity,
     encode_text,
     load_model,
+    normalise_latex,
     tokenize_text,
 )
 
@@ -30,8 +33,19 @@ def read_query(argument: str | None) -> str:
     return data
 
 
-def build_embedding(query: str, vocabulary: Vocabulary, params: ModelParameters) -> np.ndarray:
-    tokens = tokenize_text(query)
+def build_embedding(
+    query: str,
+    vocabulary: Vocabulary,
+    params: ModelParameters,
+    converter: MathMLConverter,
+) -> np.ndarray:
+    normalised = normalise_latex(query)
+    try:
+        mathml = convert_text_to_mathml(normalised, converter)
+    except Exception as exc:
+        print(f"Warning: Falling back to normalised text after MathML conversion failure: {exc}", file=sys.stderr)
+        mathml = normalised
+    tokens = tokenize_text(mathml)
     if not tokens:
         raise SystemExit("Unable to tokenise the question text. Please provide more descriptive input.")
     embedding = encode_text(tokens, vocabulary, params)
@@ -91,7 +105,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("The model file does not contain any stored question embeddings.")
 
     query_text = read_query(args.question)
-    query_embedding = build_embedding(query_text, vocabulary, params)
+    try:
+        with MathMLConverter() as converter:
+            query_embedding = build_embedding(query_text, vocabulary, params, converter)
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            "MathJax worker script not found. Ensure scripts/mathjax_worker.js exists and dependencies are installed."
+        ) from exc
     results = compute_similarities(query_embedding, questions, args.top)
     if not results:
         print("No comparable questions found in the model.")

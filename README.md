@@ -13,14 +13,21 @@ contains about two million rows).
 ## Prerequisites
 
 1. **Python** – Python 3.9 or newer is recommended.
-2. **Python packages** – Install the required libraries in the environment where
+2. **Node.js** – Required for the MathJax worker that converts LaTeX to MathML.
+   Ensure `node` is available on your PATH and install the project dependencies:
+
+   ```bash
+   npm install
+   ```
+
+3. **Python packages** – Install the required libraries in the environment where
    you will run the scripts:
 
    ```bash
    pip install numpy pymysql
    ```
 
-3. **Database access** – Ensure the host running the scripts can reach the
+4. **Database access** – Ensure the host running the scripts can reach the
    MySQL server at `194.238.23.60` and that the credentials defined in the
    scripts are valid. Adjust them locally if your environment requires a
    different configuration.
@@ -31,7 +38,9 @@ contains about two million rows).
 
 ## Training embeddings (`scripts/train_question_matcher.py`)
 
-This script streams question data from the database, builds a token vocabulary,
+This script streams question data from the database, normalises the LaTeX
+fragments with the same logic used in the React front-end, converts the result
+to MathML through MathJax, builds a token vocabulary from the MathML markup,
 trains a small autoencoder to produce dense embeddings, and saves the result to
 `data/question_embeddings.json` by default. The training loop vectorises
 questions lazily, so the peak RAM usage stays close to the batch size even on
@@ -78,7 +87,9 @@ so downstream scripts know how the embeddings were produced.
 ## Looking up similar questions (`scripts/find_similar_question.py`)
 
 Once a model is trained, use the lookup script to compare a new prompt against
-all stored embeddings:
+all stored embeddings. The tool applies the same LaTeX normalisation and MathML
+conversion pipeline as the training step before embedding the query, so the
+tokenisation remains consistent:
 
 ```bash
 python3 scripts/find_similar_question.py "Your new question prompt here"
@@ -116,6 +127,10 @@ interact with question content in the browser. Standard `npm install` and
 - **Missing columns** – If the database schema changes, supply the available
   text columns with `--text-columns`. The script will warn you about any
   missing fields instead of failing.
+- **MathJax conversion errors** – Both training and lookup spin up
+  `scripts/mathjax_worker.js`. Run `npm install` to ensure `mathjax-full` is
+  available and verify that Node.js is on your PATH if you see conversion
+  failures.
 - **Performance** – Training on millions of questions is resource intensive.
   Increase the limit gradually, and consider provisioning a machine with
   sufficient CPU cores and RAM (tens of gigabytes) for full-corpus runs.

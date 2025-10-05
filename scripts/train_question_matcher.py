@@ -11,7 +11,15 @@ import sys
 
 import numpy as np
 
-from question_matcher import Autoencoder, Vocabulary, save_model, tokenize_text
+from question_matcher import (
+    Autoencoder,
+    MathMLConverter,
+    Vocabulary,
+    convert_text_to_mathml,
+    normalise_latex,
+    save_model,
+    tokenize_text,
+)
 
 try:
     import pymysql
@@ -54,6 +62,7 @@ def fetch_questions(
     limit: int | None = None,
     chunk_size: int = 5000,
     text_columns: Sequence[str] | None = None,
+    mathml_converter: MathMLConverter | None = None,
 ) -> Tuple[List[QuestionRecord], List[str]]:
     connection = pymysql.connect(**DATABASE_CONFIG)
     try:
@@ -103,10 +112,21 @@ def fetch_questions(
                     combined = " ".join(combined_parts).strip()
                     if not combined:
                         continue
-                    tokens = tokenize_text(combined)
+                    normalised = normalise_latex(combined)
+                    transformed = normalised
+                    if mathml_converter is not None:
+                        try:
+                            transformed = convert_text_to_mathml(normalised, mathml_converter)
+                        except Exception as exc:  # pragma: no cover - conversion guard
+                            print(
+                                f"Warning: MathML conversion failed for question {row['id']}: {exc}",
+                                file=sys.stderr,
+                            )
+                            transformed = normalised
+                    tokens = tokenize_text(transformed)
                     if not tokens:
                         continue
-                    records.append(QuestionRecord(id=row["id"], text=combined, tokens=tokens))
+                    records.append(QuestionRecord(id=row["id"], text=transformed, tokens=tokens))
     finally:
         connection.close()
 
@@ -278,11 +298,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    records, used_columns = fetch_questions(
-        limit=args.limit,
-        chunk_size=args.chunk_size,
-        text_columns=args.text_columns,
-    )
+    try:
+        with MathMLConverter() as mathml_converter:
+            records, used_columns = fetch_questions(
+                limit=args.limit,
+                chunk_size=args.chunk_size,
+                text_columns=args.text_columns,
+                mathml_converter=mathml_converter,
+            )
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            "MathJax worker script not found. Ensure scripts/mathjax_worker.js exists and dependencies are installed."
+        ) from exc
 
     print(
         f"Loaded {len(records)} questions using columns: {', '.join(used_columns)}",

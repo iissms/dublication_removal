@@ -1,9 +1,11 @@
 """Utilities for training and using a lightweight neural question matcher."""
 from __future__ import annotations
 
+import html
 import json
 import math
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence
@@ -11,6 +13,39 @@ from typing import Iterable, List, Sequence
 import numpy as np
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+|\\\\[A-Za-z]+|[∑√±−=]")
+INLINE_DISPLAY_PATTERN = re.compile(r"([^\n])\\\[(.*?)\\\]([^\n])", re.DOTALL)
+HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
+MATH_SEGMENT_PATTERN = re.compile(
+    r"(\\\[.*?\\\]|\\\(.*?\\\)|\\begin\{.*?\}.*?\\end\{.*?\}|\$\$.*?\$\$)",
+    re.DOTALL,
+)
+
+
+def normalise_latex(text: str) -> str:
+    """Replicate the front-end newline normaliser for server-side processing."""
+
+    if not isinstance(text, str):
+        return text  # type: ignore[return-value]
+
+    out = text.replace("\r\n", "\n").replace("\\r\\n", "\n")
+
+    replacements = [
+        ("\\\\[", "\\["),
+        ("\\\\]", "\\]"),
+        ("\\\\(", "\\("),
+        ("\\\\)", "\\)"),
+    ]
+    for needle, repl in replacements:
+        out = out.replace(needle, repl)
+
+    out = out.replace("\\\\", "\\")
+
+    def _inline_replacer(match: re.Match[str]) -> str:
+        left, inner, right = match.groups()
+        return f"{left}\\({inner}\\){right}"
+
+    out = INLINE_DISPLAY_PATTERN.sub(_inline_replacer, out)
+    return out
 
 
 def normalise_whitespace(text: str) -> str:
@@ -19,9 +54,153 @@ def normalise_whitespace(text: str) -> str:
 
 
 def tokenize_text(text: str) -> List[str]:
-    cleaned = normalise_whitespace(text)
+    cleaned = HTML_TAG_PATTERN.sub(" ", text)
+    cleaned = normalise_whitespace(cleaned)
     cleaned = cleaned.replace("$", " ").replace("\\n", " ").lower()
     return TOKEN_PATTERN.findall(cleaned)
+
+
+class MathMLConverter:
+    """Convert LaTeX-rich text to MathML via a persistent MathJax worker."""
+
+    def __init__(self, worker_path: str | Path | None = None) -> None:
+        self.worker_path = Path(worker_path) if worker_path else Path(__file__).with_name("mathjax_worker.js")
+        self._proc: subprocess.Popen[str] | None = None
+        self._counter = 0
+
+    def __enter__(self) -> "MathMLConverter":
+        self.open()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:  # pragma: no cover - cleanup
+        self.close()
+
+    def open(self) -> None:
+        if self._proc is not None:
+            return
+        if not self.worker_path.exists():
+            raise FileNotFoundError(f"MathJax worker not found at {self.worker_path}")
+        self._proc = subprocess.Popen(
+            ["node", str(self.worker_path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+
+    def close(self) -> None:
+        if self._proc is None:
+            return
+        if self._proc.stdin and not self._proc.stdin.closed:
+            try:
+                self._proc.stdin.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+        try:
+            self._proc.wait(timeout=2)
+        except Exception:  # pragma: no cover - best effort
+            self._proc.kill()
+        finally:
+            self._proc = None
+
+    def convert(self, text: str, display: bool = False) -> str:
+        if self._proc is None or self._proc.stdin is None or self._proc.stdout is None:
+            self.open()
+        assert self._proc is not None and self._proc.stdin is not None and self._proc.stdout is not None
+        self._counter += 1
+        payload = json.dumps({"id": self._counter, "text": text, "display": bool(display)})
+        try:
+            self._proc.stdin.write(payload + "\n")
+            self._proc.stdin.flush()
+        except (BrokenPipeError, ValueError) as exc:
+            raise RuntimeError("Unable to communicate with MathJax worker") from exc
+
+        while True:
+            line = self._proc.stdout.readline()
+            if not line:
+                raise RuntimeError("MathJax worker terminated unexpectedly")
+            try:
+                response = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if response.get("id") != self._counter:
+                continue
+            if "mathml" in response:
+                return response["mathml"]
+            raise RuntimeError(response.get("detail") or "MathML conversion failed")
+
+
+MATH_WRAPPER_PATTERN = re.compile(r"^\s*<math[^>]*>(.*)</math>\s*$", re.DOTALL)
+
+
+def strip_math_delimiters(segment: str) -> tuple[str, bool]:
+    trimmed = segment.strip()
+    if trimmed.startswith("\\[") and trimmed.endswith("\\]"):
+        return trimmed[2:-2], True
+    if trimmed.startswith("$$") and trimmed.endswith("$$"):
+        return trimmed[2:-2], True
+    if trimmed.startswith("\\(") and trimmed.endswith("\\)"):
+        return trimmed[2:-2], False
+    return trimmed, trimmed.startswith("\\begin")
+
+
+def strip_mathml_wrapper(mathml: str) -> str:
+    match = MATH_WRAPPER_PATTERN.match(mathml)
+    if match:
+        return match.group(1).strip()
+    return mathml.strip()
+
+
+def plain_text_to_mathml(text: str) -> str:
+    fragments: List[str] = []
+    for chunk in re.split(r"(\n)", text):
+        if not chunk:
+            continue
+        if chunk == "\n":
+            fragments.append('<mspace linebreak="newline"/>')
+            continue
+        escaped = html.escape(chunk)
+        fragments.append(f"<mtext>{escaped}</mtext>")
+    return "".join(fragments)
+
+
+def convert_text_to_mathml(text: str, converter: MathMLConverter) -> str:
+    if not text.strip():
+        return ""
+
+    segments: List[tuple[str, str]] = []
+    position = 0
+    for match in MATH_SEGMENT_PATTERN.finditer(text):
+        start, end = match.span()
+        if start > position:
+            segments.append(("text", text[position:start]))
+        segments.append(("math", match.group(0)))
+        position = end
+    if position < len(text):
+        segments.append(("text", text[position:]))
+
+    parts: List[str] = []
+    for kind, content in segments:
+        if not content:
+            continue
+        if kind == "text":
+            parts.append(plain_text_to_mathml(content))
+            continue
+        math_tex, display = strip_math_delimiters(content)
+        if not math_tex.strip():
+            continue
+        mathml = converter.convert(math_tex, display=display)
+        inner = strip_mathml_wrapper(mathml)
+        if display:
+            parts.append(f"<mrow>{inner}</mrow>")
+        else:
+            parts.append(inner)
+
+    combined = "".join(parts).strip()
+    if not combined:
+        return ""
+    return f'<math xmlns="http://www.w3.org/1998/Math/MathML"><mrow>{combined}</mrow></math>'
 
 
 @dataclass
