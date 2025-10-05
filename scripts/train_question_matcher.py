@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Train question embeddings from the examtech database and save them locally."""
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Sequence
+
+import numpy as np
+
+from question_matcher import Autoencoder, Vocabulary, save_model, tokenize_text
+
+try:
+    import pymysql
+except ImportError as exc:  # pragma: no cover - import error path
+    raise SystemExit(
+        "pymysql is required to connect to the MySQL database. Install it with 'pip install pymysql'."
+    ) from exc
+
+
+DATABASE_CONFIG = {
+    "host": "194.238.23.60",
+    "user": "lohith_pc",
+    "password": "lohith_pc",
+    "database": "examtech",
+    "charset": "utf8mb4",
+    "cursorclass": pymysql.cursors.DictCursor,
+    "read_timeout": 30,
+    "write_timeout": 30,
+    "connect_timeout": 30,
+}
+
+
+@dataclass
+class QuestionRecord:
+    id: int
+    text: str
+    tokens: List[str]
+
+
+def fetch_questions(limit: int | None = None) -> List[QuestionRecord]:
+    query = (
+        "SELECT id, pre_question_text, question_text, option1_text, option2_text, "
+        "option3_text, option4_text FROM questions"
+    )
+    if limit is not None:
+        query += " LIMIT %s"
+    connection = pymysql.connect(**DATABASE_CONFIG)
+    try:
+        with connection.cursor() as cursor:
+            if limit is not None:
+                cursor.execute(query, (limit,))
+            else:
+                cursor.execute(query)
+            rows = cursor.fetchall()
+    finally:
+        connection.close()
+
+    records: List[QuestionRecord] = []
+    for row in rows:
+        parts = [
+            row.get("pre_question_text"),
+            row.get("question_text"),
+            row.get("option1_text"),
+            row.get("option2_text"),
+            row.get("option3_text"),
+            row.get("option4_text"),
+        ]
+        combined = " ".join(part for part in parts if part)
+        combined = combined.strip()
+        if not combined:
+            continue
+        tokens = tokenize_text(combined)
+        if not tokens:
+            continue
+        records.append(QuestionRecord(id=row["id"], text=combined, tokens=tokens))
+    return records
+
+
+def build_training_matrix(vocabulary: Vocabulary, records: Sequence[QuestionRecord]) -> np.ndarray:
+    matrix = np.vstack([vocabulary.vectorise(record.tokens) for record in records])
+    return matrix.astype(np.float32)
+
+
+def ensure_directory(path: str | Path) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+def train_model(
+    records: Sequence[QuestionRecord],
+    hidden_size: int,
+    embedding_size: int,
+    learning_rate: float,
+    epochs: int,
+    batch_size: int,
+    seed: int,
+) -> tuple[Vocabulary, Autoencoder, np.ndarray]:
+    token_sequences = [record.tokens for record in records]
+    vocabulary = Vocabulary.build(token_sequences)
+    matrix = build_training_matrix(vocabulary, records)
+
+    autoencoder = Autoencoder(
+        input_size=vocabulary.size,
+        hidden_size=hidden_size,
+        embedding_size=embedding_size,
+        learning_rate=learning_rate,
+        seed=seed,
+    )
+    autoencoder.fit(matrix, epochs=epochs, batch_size=batch_size)
+    embeddings = autoencoder.encode(matrix)
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    embeddings = embeddings / norms
+    return vocabulary, autoencoder, embeddings
+
+
+def save_trained_model(
+    output_path: Path,
+    vocabulary: Vocabulary,
+    autoencoder: Autoencoder,
+    records: Sequence[QuestionRecord],
+    embeddings: np.ndarray,
+) -> None:
+    ensure_directory(output_path)
+    questions = [
+        {"id": record.id, "text": record.text}
+        for record in records
+    ]
+    save_model(output_path, vocabulary, autoencoder.parameters(), questions, embeddings)
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit the number of questions fetched from the database.",
+    )
+    parser.add_argument(
+        "--hidden-size",
+        type=int,
+        default=128,
+        help="Number of neurons in the hidden layer.",
+    )
+    parser.add_argument(
+        "--embedding-size",
+        type=int,
+        default=64,
+        help="Size of the embedding vector.",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=0.01,
+        help="Learning rate for gradient descent.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=50,
+        help="Number of training epochs.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="Mini-batch size for training.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for weight initialisation.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/question_embeddings.json"),
+        help="Path to the output model file.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    records = fetch_questions(limit=args.limit)
+    if not records:
+        raise SystemExit("No questions retrieved from the database. Nothing to train.")
+
+    vocabulary, autoencoder, embeddings = train_model(
+        records,
+        hidden_size=args.hidden_size,
+        embedding_size=args.embedding_size,
+        learning_rate=args.learning_rate,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        seed=args.seed,
+    )
+
+    save_trained_model(args.output, vocabulary, autoencoder, records, embeddings)
+    print(f"Saved trained model with {len(records)} questions to {args.output}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
