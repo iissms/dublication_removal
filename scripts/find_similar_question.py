@@ -145,11 +145,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "mathml",
-        help="MathML snippet or path to a file containing MathML.",
+        nargs="?",
+        help="MathML snippet or path to a file containing MathML. If omitted, the script reads from standard input.",
     )
     args = parser.parse_args(argv)
 
-    mathml_snippet = load_mathml_input(args.mathml)
+    mathml_snippet: str | None = None
+
+    if args.mathml:
+        mathml_snippet = load_mathml_input(args.mathml)
+    else:
+        if not sys.stdin.isatty():
+            streamed = sys.stdin.read()
+            if streamed.strip():
+                mathml_snippet = streamed
+
+    if not mathml_snippet:
+        parser.error(
+            "No MathML provided. Supply a snippet/path argument or pipe MathML to stdin."
+        )
 
     token_sequences = [
         list(iter_mathml_tokens(mathml_snippet)),
