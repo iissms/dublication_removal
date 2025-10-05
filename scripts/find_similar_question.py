@@ -155,10 +155,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.mathml:
         mathml_snippet = load_mathml_input(args.mathml)
     else:
-        if not sys.stdin.isatty():
-            streamed = sys.stdin.read()
-            if streamed.strip():
-                mathml_snippet = streamed
+        if sys.stdin.isatty():
+            print(
+                "Paste the MathML snippet and finish with Ctrl-D (Unix) or Ctrl-Z (Windows):",
+                file=sys.stderr,
+            )
+        streamed = sys.stdin.read()
+        if streamed.strip():
+            mathml_snippet = streamed
 
     if not mathml_snippet:
         parser.error(
