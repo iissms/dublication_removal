@@ -115,9 +115,22 @@ def fetch_questions(
     return records, selected_columns
 
 
-def build_training_matrix(vocabulary: Vocabulary, records: Sequence[QuestionRecord]) -> np.ndarray:
-    matrix = np.vstack([vocabulary.vectorise(record.tokens) for record in records])
-    return matrix.astype(np.float32)
+class QuestionDataset:
+    """Vectorises question records lazily to reduce peak memory usage."""
+
+    def __init__(self, records: Sequence[QuestionRecord], vocabulary: Vocabulary) -> None:
+        self._records = list(records)
+        self._vocabulary = vocabulary
+
+    def __len__(self) -> int:  # pragma: no cover - trivial
+        return len(self._records)
+
+    def vectors_for_indices(self, indices: Sequence[int]) -> np.ndarray:
+        batch = np.zeros((len(indices), self._vocabulary.size), dtype=np.float32)
+        for row, record_index in enumerate(indices):
+            tokens = self._records[record_index].tokens
+            batch[row] = self._vocabulary.vectorise(tokens)
+        return batch
 
 
 def ensure_directory(path: str | Path) -> None:
@@ -135,7 +148,7 @@ def train_model(
 ) -> tuple[Vocabulary, Autoencoder, np.ndarray]:
     token_sequences = [record.tokens for record in records]
     vocabulary = Vocabulary.build(token_sequences)
-    matrix = build_training_matrix(vocabulary, records)
+    dataset = QuestionDataset(records, vocabulary)
 
     autoencoder = Autoencoder(
         input_size=vocabulary.size,
@@ -144,8 +157,8 @@ def train_model(
         learning_rate=learning_rate,
         seed=seed,
     )
-    autoencoder.fit(matrix, epochs=epochs, batch_size=batch_size)
-    embeddings = autoencoder.encode(matrix)
+    autoencoder.fit(dataset, epochs=epochs, batch_size=batch_size)
+    embeddings = autoencoder.encode_dataset(dataset, batch_size=max(batch_size, 1024))
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     embeddings = embeddings / norms

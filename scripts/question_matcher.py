@@ -131,38 +131,73 @@ class Autoencoder:
         recon = np.tanh(z3)
         return a1, a2, recon
 
-    def fit(self, inputs: np.ndarray, epochs: int = 50, batch_size: int = 64) -> None:
-        if inputs.size == 0:
+    def fit(self, inputs, epochs: int = 50, batch_size: int = 64) -> None:
+        """Train the autoencoder on either an ndarray or a lazy dataset."""
+
+        if isinstance(inputs, np.ndarray):
+            if inputs.size == 0:
+                return
+            n_samples = inputs.shape[0]
+            for _ in range(epochs):
+                permutation = self._rng.permutation(n_samples)
+                for start in range(0, n_samples, batch_size):
+                    indices = permutation[start : start + batch_size]
+                    batch = inputs[indices]
+                    self._train_batch(batch)
             return
-        n_samples = inputs.shape[0]
-        for epoch in range(epochs):
+
+        if not hasattr(inputs, "vectors_for_indices"):
+            raise TypeError("inputs must be either a numpy array or provide a vectors_for_indices() method")
+
+        n_samples = len(inputs)
+        if n_samples == 0:
+            return
+
+        for _ in range(epochs):
             permutation = self._rng.permutation(n_samples)
             for start in range(0, n_samples, batch_size):
-                indices = permutation[start : start + batch_size]
-                batch = inputs[indices]
-                hidden, embedding, reconstruction = self._forward(batch)
-                error = reconstruction - batch
-                delta3 = error * (1.0 - reconstruction**2)
-                grad_w3 = embedding.T @ delta3 / len(batch)
-                grad_b3 = delta3.mean(axis=0)
-                delta2 = (delta3 @ self.w3.T) * (1.0 - embedding**2)
-                grad_w2 = hidden.T @ delta2 / len(batch)
-                grad_b2 = delta2.mean(axis=0)
-                delta1 = (delta2 @ self.w2.T) * (1.0 - hidden**2)
-                grad_w1 = batch.T @ delta1 / len(batch)
-                grad_b1 = delta1.mean(axis=0)
+                batch_indices = permutation[start : start + batch_size]
+                batch_vectors = inputs.vectors_for_indices(batch_indices.tolist())
+                self._train_batch(batch_vectors)
 
-                self.w3 -= self.learning_rate * grad_w3
-                self.b3 -= self.learning_rate * grad_b3
-                self.w2 -= self.learning_rate * grad_w2
-                self.b2 -= self.learning_rate * grad_b2
-                self.w1 -= self.learning_rate * grad_w1
-                self.b1 -= self.learning_rate * grad_b1
+    def _train_batch(self, batch: np.ndarray) -> None:
+        hidden, embedding, reconstruction = self._forward(batch)
+        error = reconstruction - batch
+        delta3 = error * (1.0 - reconstruction**2)
+        grad_w3 = embedding.T @ delta3 / len(batch)
+        grad_b3 = delta3.mean(axis=0)
+        delta2 = (delta3 @ self.w3.T) * (1.0 - embedding**2)
+        grad_w2 = hidden.T @ delta2 / len(batch)
+        grad_b2 = delta2.mean(axis=0)
+        delta1 = (delta2 @ self.w2.T) * (1.0 - hidden**2)
+        grad_w1 = batch.T @ delta1 / len(batch)
+        grad_b1 = delta1.mean(axis=0)
+
+        self.w3 -= self.learning_rate * grad_w3
+        self.b3 -= self.learning_rate * grad_b3
+        self.w2 -= self.learning_rate * grad_w2
+        self.b2 -= self.learning_rate * grad_b2
+        self.w1 -= self.learning_rate * grad_w1
+        self.b1 -= self.learning_rate * grad_b1
 
     def encode(self, inputs: np.ndarray) -> np.ndarray:
         hidden = np.tanh(inputs @ self.w1 + self.b1)
         embedding = np.tanh(hidden @ self.w2 + self.b2)
         return embedding
+
+    def encode_dataset(self, dataset, batch_size: int = 1024) -> np.ndarray:
+        if not hasattr(dataset, "vectors_for_indices"):
+            raise TypeError("dataset must provide a vectors_for_indices() method")
+        total = len(dataset)
+        embeddings = np.empty((total, self.embedding_size), dtype=np.float32)
+        position = 0
+        while position < total:
+            end = min(position + batch_size, total)
+            indices = list(range(position, end))
+            batch_vectors = dataset.vectors_for_indices(indices)
+            embeddings[position:end] = self.encode(batch_vectors)
+            position = end
+        return embeddings
 
     def parameters(self) -> ModelParameters:
         return ModelParameters(self.w1, self.b1, self.w2, self.b2, self.w3, self.b3)

@@ -33,7 +33,9 @@ contains about two million rows).
 
 This script streams question data from the database, builds a token vocabulary,
 trains a small autoencoder to produce dense embeddings, and saves the result to
-`data/question_embeddings.json` by default.
+`data/question_embeddings.json` by default. The training loop vectorises
+questions lazily, so the peak RAM usage stays close to the batch size even on
+large corpora.
 
 ### Basic usage
 
@@ -44,8 +46,9 @@ python3 scripts/train_question_matcher.py --limit 50000
 Key options:
 
 - `--limit` – Restrict the number of questions pulled from the database. Start
-  with a manageable limit while validating the workflow. Training on the full
-  ~2M question set requires substantial RAM and time; scale gradually.
+  with a manageable limit while validating the workflow. Even though batches are
+  now built lazily, training on the full ~2M question set still demands time and
+  disk space for the exported embeddings, so scale gradually.
 - `--chunk-size` – Controls how many rows are streamed from MySQL per roundtrip
   (default `5000`). Increase it if you have ample memory and want faster
   transfers; decrease it if you see memory pressure.
