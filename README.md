@@ -64,7 +64,12 @@ Key options:
 
 - `--hidden-size`, `--embedding-size`, `--learning-rate`, `--epochs`,
   `--batch-size`, `--seed` – Tune the neural network architecture and training
-  loop. The defaults provide a reasonable trade-off between speed and recall.
+  loop. The default learning rate (`0.001`) is intentionally conservative to
+  keep the optimiser stable on very large vocabularies.
+- `--max-grad-norm`, `--weight-clip` – Additional safety valves that clamp
+  gradient norms and raw weights after each update. The defaults are tuned to
+  prevent the overflows observed when training on six-figure batches without
+  requiring manual intervention.
 - `--output` – Location of the JSON model artefact.
 
 The generated model records metadata (column selection and number of questions)

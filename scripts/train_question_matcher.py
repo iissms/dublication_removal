@@ -145,6 +145,8 @@ def train_model(
     epochs: int,
     batch_size: int,
     seed: int,
+    max_grad_norm: float,
+    weight_clip: float,
 ) -> tuple[Vocabulary, Autoencoder, np.ndarray]:
     token_sequences = [record.tokens for record in records]
     vocabulary = Vocabulary.build(token_sequences)
@@ -156,6 +158,8 @@ def train_model(
         embedding_size=embedding_size,
         learning_rate=learning_rate,
         seed=seed,
+        max_grad_norm=max_grad_norm,
+        weight_clip=weight_clip,
     )
     autoencoder.fit(dataset, epochs=epochs, batch_size=batch_size)
     embeddings = autoencoder.encode_dataset(dataset, batch_size=max(batch_size, 1024))
@@ -220,8 +224,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=0.01,
-        help="Learning rate for gradient descent.",
+        default=0.001,
+        help="Learning rate for gradient descent (lower values improve stability).",
     )
     parser.add_argument(
         "--epochs",
@@ -240,6 +244,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=42,
         help="Random seed for weight initialisation.",
+    )
+    parser.add_argument(
+        "--max-grad-norm",
+        type=float,
+        default=5.0,
+        help="Clip gradient norms to this value to avoid numerical instability.",
+    )
+    parser.add_argument(
+        "--weight-clip",
+        type=float,
+        default=5.0,
+        help="Clip network weights to this absolute value after each update.",
     )
     parser.add_argument(
         "--output",
@@ -281,6 +297,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         epochs=args.epochs,
         batch_size=args.batch_size,
         seed=args.seed,
+        max_grad_norm=args.max_grad_norm,
+        weight_clip=args.weight_clip,
     )
 
     save_trained_model(

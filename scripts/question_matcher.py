@@ -108,12 +108,16 @@ class Autoencoder:
         embedding_size: int = 64,
         learning_rate: float = 0.01,
         seed: int = 42,
+        max_grad_norm: float = 5.0,
+        weight_clip: float = 5.0,
     ) -> None:
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.embedding_size = embedding_size
         self.learning_rate = learning_rate
         self._rng = np.random.default_rng(seed)
+        self.max_grad_norm = max_grad_norm if max_grad_norm and max_grad_norm > 0 else None
+        self.weight_clip = weight_clip if weight_clip and weight_clip > 0 else None
         scale = 1.0 / math.sqrt(max(1, input_size))
         self.w1 = self._rng.normal(0.0, scale, size=(input_size, hidden_size)).astype(np.float32)
         self.b1 = np.zeros(hidden_size, dtype=np.float32)
@@ -123,11 +127,11 @@ class Autoencoder:
         self.b3 = np.zeros(input_size, dtype=np.float32)
 
     def _forward(self, batch: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        z1 = batch @ self.w1 + self.b1
+        z1 = np.clip(batch @ self.w1 + self.b1, -10.0, 10.0)
         a1 = np.tanh(z1)
-        z2 = a1 @ self.w2 + self.b2
+        z2 = np.clip(a1 @ self.w2 + self.b2, -10.0, 10.0)
         a2 = np.tanh(z2)
-        z3 = a2 @ self.w3 + self.b3
+        z3 = np.clip(a2 @ self.w3 + self.b3, -10.0, 10.0)
         recon = np.tanh(z3)
         return a1, a2, recon
 
@@ -173,6 +177,29 @@ class Autoencoder:
         grad_w1 = batch.T @ delta1 / len(batch)
         grad_b1 = delta1.mean(axis=0)
 
+        grads = [
+            grad_w1,
+            grad_b1,
+            grad_w2,
+            grad_b2,
+            grad_w3,
+            grad_b3,
+        ]
+        if self.max_grad_norm:
+            total_norm = math.sqrt(
+                sum(float(np.sum(np.asarray(g, dtype=np.float64) ** 2)) for g in grads)
+            )
+        else:
+            total_norm = 0.0
+        if self.max_grad_norm and total_norm > 0 and total_norm > self.max_grad_norm:
+            scale = self.max_grad_norm / (total_norm + 1e-8)
+            grad_w1 *= scale
+            grad_b1 *= scale
+            grad_w2 *= scale
+            grad_b2 *= scale
+            grad_w3 *= scale
+            grad_b3 *= scale
+
         self.w3 -= self.learning_rate * grad_w3
         self.b3 -= self.learning_rate * grad_b3
         self.w2 -= self.learning_rate * grad_w2
@@ -180,9 +207,14 @@ class Autoencoder:
         self.w1 -= self.learning_rate * grad_w1
         self.b1 -= self.learning_rate * grad_b1
 
+        if self.weight_clip is not None:
+            np.clip(self.w1, -self.weight_clip, self.weight_clip, out=self.w1)
+            np.clip(self.w2, -self.weight_clip, self.weight_clip, out=self.w2)
+            np.clip(self.w3, -self.weight_clip, self.weight_clip, out=self.w3)
+
     def encode(self, inputs: np.ndarray) -> np.ndarray:
-        hidden = np.tanh(inputs @ self.w1 + self.b1)
-        embedding = np.tanh(hidden @ self.w2 + self.b2)
+        hidden = np.tanh(np.clip(inputs @ self.w1 + self.b1, -10.0, 10.0))
+        embedding = np.tanh(np.clip(hidden @ self.w2 + self.b2, -10.0, 10.0))
         return embedding
 
     def encode_dataset(self, dataset, batch_size: int = 1024) -> np.ndarray:
