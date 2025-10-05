@@ -35,15 +35,11 @@ DATABASE_CONFIG = {
 
 
 DEFAULT_TEXT_COLUMNS = [
-    "question_text",
-    "question",
     "pre_question_text",
     "option1_text",
     "option2_text",
     "option3_text",
     "option4_text",
-    "option5_text",
-    "hint_text",
 ]
 
 
@@ -245,7 +241,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Columns from the questions table to concatenate when building training text. "
-            "Defaults to a set covering question and option fields."
+            "Defaults to pre_question_text and the four option columns."
         ),
     )
     return parser.parse_args(argv)

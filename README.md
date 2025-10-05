@@ -50,9 +50,8 @@ Key options:
   (default `5000`). Increase it if you have ample memory and want faster
   transfers; decrease it if you see memory pressure.
 - `--text-columns` – Override the columns that are concatenated to form the
-  training text. The script automatically ignores columns that are absent (for
-  example, the `question_text` column is not present in the current schema).
-  Example:
+  training text. By default the script only uses `pre_question_text` and the
+  four option fields. It automatically ignores columns that are absent. Example:
 
   ```bash
   python3 scripts/train_question_matcher.py \
