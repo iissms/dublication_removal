@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Sequence, Tuple
+
+import sys
 
 import numpy as np
 
@@ -32,6 +34,19 @@ DATABASE_CONFIG = {
 }
 
 
+DEFAULT_TEXT_COLUMNS = [
+    "question_text",
+    "question",
+    "pre_question_text",
+    "option1_text",
+    "option2_text",
+    "option3_text",
+    "option4_text",
+    "option5_text",
+    "hint_text",
+]
+
+
 @dataclass
 class QuestionRecord:
     id: int
@@ -39,43 +54,69 @@ class QuestionRecord:
     tokens: List[str]
 
 
-def fetch_questions(limit: int | None = None) -> List[QuestionRecord]:
-    query = (
-        "SELECT id, pre_question_text, question_text, option1_text, option2_text, "
-        "option3_text, option4_text FROM questions"
-    )
-    if limit is not None:
-        query += " LIMIT %s"
+def fetch_questions(
+    limit: int | None = None,
+    chunk_size: int = 5000,
+    text_columns: Sequence[str] | None = None,
+) -> Tuple[List[QuestionRecord], List[str]]:
     connection = pymysql.connect(**DATABASE_CONFIG)
     try:
         with connection.cursor() as cursor:
+            cursor.execute("SHOW COLUMNS FROM questions")
+            available_columns = {row["Field"] for row in cursor.fetchall()}
+
+        requested_columns = list(dict.fromkeys(text_columns or DEFAULT_TEXT_COLUMNS))
+        selected_columns = [column for column in requested_columns if column in available_columns]
+        missing_columns = [column for column in requested_columns if column not in available_columns]
+        if missing_columns:
+            print(
+                "Warning: the following text columns are not present in the questions table and will be ignored: "
+                + ", ".join(missing_columns),
+                file=sys.stderr,
+            )
+        if not selected_columns:
+            raise SystemExit(
+                "None of the requested text columns were found in the questions table. "
+                "Use --text-columns to specify the available fields."
+            )
+
+        select_clause = ", ".join(["`id`"] + [f"`{column}`" for column in selected_columns])
+        query = f"SELECT {select_clause} FROM questions"
+        if limit is not None:
+            query += " LIMIT %s"
+
+        records: List[QuestionRecord] = []
+        with connection.cursor(pymysql.cursors.SSDictCursor) as cursor:
             if limit is not None:
                 cursor.execute(query, (limit,))
             else:
                 cursor.execute(query)
-            rows = cursor.fetchall()
+            while True:
+                rows = cursor.fetchmany(chunk_size)
+                if not rows:
+                    break
+                for row in rows:
+                    combined_parts = []
+                    for column in selected_columns:
+                        value = row.get(column)
+                        if not value:
+                            continue
+                        text_value = str(value).strip()
+                        if text_value:
+                            combined_parts.append(text_value)
+                    combined = " ".join(combined_parts).strip()
+                    if not combined:
+                        continue
+                    tokens = tokenize_text(combined)
+                    if not tokens:
+                        continue
+                    records.append(QuestionRecord(id=row["id"], text=combined, tokens=tokens))
     finally:
         connection.close()
 
-    records: List[QuestionRecord] = []
-    for row in rows:
-        parts = [
-            row.get("pre_question_text"),
-            row.get("question_text"),
-            row.get("option1_text"),
-            row.get("option2_text"),
-            row.get("option3_text"),
-            row.get("option4_text"),
-        ]
-        combined = " ".join(part for part in parts if part)
-        combined = combined.strip()
-        if not combined:
-            continue
-        tokens = tokenize_text(combined)
-        if not tokens:
-            continue
-        records.append(QuestionRecord(id=row["id"], text=combined, tokens=tokens))
-    return records
+    if not records:
+        raise SystemExit("No usable question rows were retrieved from the database.")
+    return records, selected_columns
 
 
 def build_training_matrix(vocabulary: Vocabulary, records: Sequence[QuestionRecord]) -> np.ndarray:
@@ -121,13 +162,24 @@ def save_trained_model(
     autoencoder: Autoencoder,
     records: Sequence[QuestionRecord],
     embeddings: np.ndarray,
+    used_columns: Sequence[str] | None = None,
 ) -> None:
     ensure_directory(output_path)
     questions = [
         {"id": record.id, "text": record.text}
         for record in records
     ]
-    save_model(output_path, vocabulary, autoencoder.parameters(), questions, embeddings)
+    metadata = {"question_count": len(records)}
+    if used_columns:
+        metadata["text_columns"] = list(used_columns)
+    save_model(
+        output_path,
+        vocabulary,
+        autoencoder.parameters(),
+        questions,
+        embeddings,
+        metadata=metadata,
+    )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -137,6 +189,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="Limit the number of questions fetched from the database.",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=5000,
+        help="Number of rows to stream from the database at a time.",
     )
     parser.add_argument(
         "--hidden-size",
@@ -180,14 +238,31 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=Path("data/question_embeddings.json"),
         help="Path to the output model file.",
     )
+    parser.add_argument(
+        "--text-columns",
+        nargs="+",
+        metavar="COLUMN",
+        default=None,
+        help=(
+            "Columns from the questions table to concatenate when building training text. "
+            "Defaults to a set covering question and option fields."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    records = fetch_questions(limit=args.limit)
-    if not records:
-        raise SystemExit("No questions retrieved from the database. Nothing to train.")
+    records, used_columns = fetch_questions(
+        limit=args.limit,
+        chunk_size=args.chunk_size,
+        text_columns=args.text_columns,
+    )
+
+    print(
+        f"Loaded {len(records)} questions using columns: {', '.join(used_columns)}",
+        file=sys.stderr,
+    )
 
     vocabulary, autoencoder, embeddings = train_model(
         records,
@@ -199,7 +274,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed=args.seed,
     )
 
-    save_trained_model(args.output, vocabulary, autoencoder, records, embeddings)
+    save_trained_model(
+        args.output,
+        vocabulary,
+        autoencoder,
+        records,
+        embeddings,
+        used_columns=used_columns,
+    )
     print(f"Saved trained model with {len(records)} questions to {args.output}")
     return 0
 

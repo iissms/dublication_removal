@@ -182,6 +182,7 @@ def save_model(
     params: ModelParameters,
     questions: Iterable[dict],
     embeddings: np.ndarray,
+    metadata: dict | None = None,
 ) -> None:
     payload = {
         "vocabulary": vocabulary.to_json(),
@@ -193,6 +194,8 @@ def save_model(
         },
         "questions": [],
     }
+    if metadata:
+        payload["metadata"] = metadata
     for record, embedding in zip(questions, embeddings.tolist()):
         payload["questions"].append({
             "id": record["id"],
