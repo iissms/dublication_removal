@@ -1,70 +1,141 @@
-# Getting Started with Create React App
+# Question Deduplication Toolkit
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+This repository contains a React front-end for reviewing questions and a set of
+Python utilities that help detect duplicate questions stored in the
+`examtech` MySQL database. The utilities fetch the questions, train a compact
+neural embedding model, and surface previously seen questions that most closely
+match a new prompt.
 
-## Available Scripts
+The sections below describe how to prepare your environment and how to use the
+training and lookup scripts with large question sets (the production database
+contains about two million rows).
 
-In the project directory, you can run:
+## Prerequisites
 
-### `npm start`
+1. **Python** – Python 3.9 or newer is recommended.
+2. **Node.js** – Required for the MathJax worker that converts LaTeX to MathML.
+   Ensure `node` is available on your PATH and install the project dependencies:
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+   ```bash
+   npm install
+   ```
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+3. **Python packages** – Install the required libraries in the environment where
+   you will run the scripts:
 
-### `npm test`
+   ```bash
+   pip install numpy pymysql
+   ```
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+4. **Database access** – Ensure the host running the scripts can reach the
+   MySQL server at `194.238.23.60` and that the credentials defined in the
+   scripts are valid. Adjust them locally if your environment requires a
+   different configuration.
 
-### `npm run build`
+> **Security note:** The scripts embed database credentials that were provided
+> for development. Rotate the password or load it from environment variables if
+> you commit customised versions of these utilities elsewhere.
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+## Training embeddings (`scripts/train_question_matcher.py`)
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+This script streams question data from the database, normalises the LaTeX
+fragments with the same logic used in the React front-end, converts the result
+to MathML through MathJax, builds a token vocabulary from the MathML markup,
+trains a small autoencoder to produce dense embeddings, and saves the result to
+`data/question_embeddings.json` by default. The training loop vectorises
+questions lazily, so the peak RAM usage stays close to the batch size even on
+large corpora.
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+### Basic usage
 
-### `npm run eject`
+```bash
+python3 scripts/train_question_matcher.py --limit 50000
+```
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+Key options:
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+- `--limit` – Restrict the number of questions pulled from the database. Start
+  with a manageable limit while validating the workflow. Even though batches are
+  now built lazily, training on the full ~2M question set still demands time and
+  disk space for the exported embeddings, so scale gradually.
+- `--chunk-size` – Controls how many rows are streamed from MySQL per roundtrip
+  (default `5000`). Increase it if you have ample memory and want faster
+  transfers; decrease it if you see memory pressure.
+- `--text-columns` – Override the columns that are concatenated to form the
+  training text. By default the script only uses `pre_question_text` and the
+  four option fields. It automatically ignores columns that are absent. Example:
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+  ```bash
+  python3 scripts/train_question_matcher.py \
+      --text-columns pre_question_text option1_text option2_text option3_text option4_text \
+      --limit 100000
+  ```
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+- `--hidden-size`, `--embedding-size`, `--learning-rate`, `--epochs`,
+  `--batch-size`, `--seed` – Tune the neural network architecture and training
+  loop. The default learning rate (`0.001`) is intentionally conservative to
+  keep the optimiser stable on very large vocabularies.
+- `--max-grad-norm`, `--weight-clip` – Additional safety valves that clamp
+  gradient norms and raw weights after each update. The defaults are tuned to
+  prevent the overflows observed when training on six-figure batches without
+  requiring manual intervention.
+- `--output` – Location of the JSON model artefact.
 
-## Learn More
+The generated model records metadata (column selection and number of questions)
+so downstream scripts know how the embeddings were produced.
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+## Looking up similar questions (`scripts/find_similar_question.py`)
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+Once a model is trained, use the lookup script to compare a new prompt against
+all stored embeddings. The tool applies the same LaTeX normalisation and MathML
+conversion pipeline as the training step before embedding the query, so the
+tokenisation remains consistent:
 
-### Code Splitting
+```bash
+python3 scripts/find_similar_question.py "Your new question prompt here"
+```
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+If you omit the question text, the script prompts you to paste it in stdin.
+Additional flags:
 
-### Analyzing the Bundle Size
+- `--model` – Path to the JSON file produced by the training step (defaults to
+  `data/question_embeddings.json`).
+- `--top` – Number of similar questions to list (defaults to `5`).
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+The output shows the cosine similarity score along with the stored question ID
+and combined text so you can decide whether to mark the new prompt as a
+duplicate.
 
-### Making a Progressive Web App
+## Workflow summary
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+1. Install Python dependencies.
+2. Run `scripts/train_question_matcher.py`, starting with a conservative limit.
+3. Inspect the generated `data/question_embeddings.json` and confirm it
+   contains a healthy sample of the database.
+4. Use `scripts/find_similar_question.py` to check incoming questions against
+   the trained embeddings before inserting them into the database.
+5. Re-train periodically to refresh embeddings as the question bank evolves.
 
-### Advanced Configuration
+## Front-end (optional)
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+The React application in `src/` remains available if you need to visualise or
+interact with question content in the browser. Standard `npm install` and
+`npm start` commands supplied by Create React App continue to work.
 
-### Deployment
+## Troubleshooting
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
+- **Missing columns** – If the database schema changes, supply the available
+  text columns with `--text-columns`. The script will warn you about any
+  missing fields instead of failing.
+- **MathJax conversion errors** – Both training and lookup spin up
+  `scripts/mathjax_worker.js`. Run `npm install` to ensure `mathjax-full` is
+  available and verify that Node.js is on your PATH if you see conversion
+  failures.
+- **Performance** – Training on millions of questions is resource intensive.
+  Increase the limit gradually, and consider provisioning a machine with
+  sufficient CPU cores and RAM (tens of gigabytes) for full-corpus runs.
+- **Model size** – The JSON file grows with the number of questions. Compress or
+  rotate older snapshots if disk usage becomes an issue.
 
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+Keeping an up-to-date embedding model lets you flag duplicates quickly and
+maintain a high-quality question bank without manual inspection of every entry.
